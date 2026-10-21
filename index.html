@@ -118,6 +118,12 @@ body {
 .legend-bar { height: 10px; border-radius: 3px; margin: 5px 0 3px; }
 .legend-scale { display: flex; justify-content: space-between; color: var(--ink-soft); }
 
+/* станции: значок с контуром, цвет UCELL; не в эфире — серый */
+.site-icon svg { display: block; filter: drop-shadow(0 1px 1px rgba(0,0,0,.35)); }
+.legend-sites { display: flex; gap: 12px; margin-top: 6px; color: var(--ink-soft); }
+.legend-sites span { display: flex; align-items: center; gap: 5px; }
+.legend-sites svg { width: 14px; height: 14px; }
+
 /* предупреждения */
 .notice {
   position: absolute; z-index: 960; left: 12px; right: 12px; top: 12px;
@@ -232,6 +238,7 @@ body {
     <div>Замеров у конкурентов</div>
     <div class="legend-bar" id="legendBar"></div>
     <div class="legend-scale"><span id="lgLo">меньше</span><span id="lgHi">больше</span></div>
+    <div class="legend-sites" id="lgSites" hidden></div>
   </div>
 
   <aside class="list" id="list" aria-label="Список ячеек">
@@ -302,6 +309,34 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
     return `linear-gradient(90deg, ${parts.join(',')})`;
   }
 
+  // ---------------------------------------------------------- станции
+  // Тот же значок, что в основной карте: силуэт мачты с тёмным
+  // контуром, чтобы читался и на светлой подложке, и поверх ячеек
+  const SITE_COLOR = { active: 'rgb(124,58,160)', inactive: 'rgb(150,150,158)' };
+  const towerSvg = (fill, size = 28) => `
+<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 32 32">
+  <g fill="${fill}" stroke="#0c0e14" stroke-width="1.6" stroke-linejoin="round" paint-order="stroke">
+    <path d="M14.4 12h3.2l2.3 17h-3.1L16 20l-0.8 9h-3.1z"/>
+    <circle cx="16" cy="8.6" r="3"/>
+    <path d="M9.6 2.2l1.9 1.9a6.4 6.4 0 0 0 0 9l-1.9 1.9a9 9 0 0 1 0-12.8z"/>
+    <path d="M22.4 2.2a9 9 0 0 1 0 12.8l-1.9-1.9a6.4 6.4 0 0 0 0-9z"/>
+  </g>
+</svg>`;
+  // в эфире — если хоть один передатчик работает; без диапазонов
+  // площадка заведена в реестре, но параметров у неё нет
+  const siteActive = (p) => p?.status === 'ONAIR';
+  const STATUS_LABEL = {
+    ONAIR: 'в эфире', ROLLOUT: 'строится',
+    INTEGRATED: 'интегрирована', NODATA: 'без параметров',
+  };
+  const siteIcon = (p, big = false) => L.divIcon({
+    className: 'site-icon',
+    html: towerSvg(siteActive(p) ? SITE_COLOR.active : SITE_COLOR.inactive, big ? 40 : 28),
+    iconSize: big ? [40, 40] : [28, 28],
+    // привязка к основанию мачты, а не к центру значка
+    iconAnchor: big ? [20, 40] : [14, 28],
+  });
+
   // ---------------------------------------------------------- геометрия
   // Гаверсинус: плоская формула на широте Узбекистана врала бы по
   // долготе примерно на четверть
@@ -319,6 +354,12 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
     if (a === 1 && b !== 11) return 'ячейка';
     if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return 'ячейки';
     return 'ячеек';
+  }
+  function sitesWord(n) {
+    const a = n % 10, b = n % 100;
+    if (a === 1 && b !== 11) return 'станция';
+    if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return 'станции';
+    return 'станций';
   }
   const pct = (v) => v == null ? '—' : `${(v * 100).toFixed(1)}%`;
   const num = (v) => v == null ? '—' : Math.round(v).toLocaleString('ru');
@@ -354,7 +395,8 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
   }).addTo(map);
 
   const $ = (id) => document.getElementById(id);
-  let cellsLayer = null, youMarker = null, youAccuracy = null, youLine = null;
+  let cellsLayer = null, sitesLayer = null;
+  let youMarker = null, youAccuracy = null, youLine = null;
   let you = null, watchId = null, following = false, activeCell = null;
   // все ячейки файла со своими слоями: список строится по ним,
   // щелчок по строке находит слой и приближает карту
@@ -400,9 +442,16 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
     notice('');
     const meta = data.metadata || {};
 
+    // В файле могут лежать и ячейки, и площадки — одним файлом, чтобы
+    // хватало одного «Открыть». Различаются по kind; в старых файлах
+    // его нет, тогда ячейка — это всё, что не точка
+    const isSite = (f) => f.properties?.kind === 'site' || f.geometry?.type === 'Point';
+    const cellFeatures = data.features.filter((f) => !isSite(f));
+    const siteFeatures = data.features.filter(isSite);
+
     // Цвет — число замеров конкурентов: сколько людей в этом месте
     // UCELL не видит. Края шкалы — фактический разброс в файле.
-    const others = data.features
+    const others = cellFeatures
       .map((f) => Number(f.properties?.others_n))
       .filter((v) => Number.isFinite(v));
     const oLo = others.length ? Math.min(...others) : 0;
@@ -411,7 +460,8 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
     cells = [];
 
     if (cellsLayer) cellsLayer.remove();
-    cellsLayer = L.geoJSON(data, {
+    if (sitesLayer) { sitesLayer.remove(); sitesLayer = null; }
+    cellsLayer = L.geoJSON({ type: 'FeatureCollection', features: cellFeatures }, {
       style: (f) => ({ ...BASE_STYLE, fillColor: fill(f.properties), fillOpacity: 0.62 }),
       onEachFeature: (f, layer) => {
         cells.push({ f, layer, c: centroid(layer) });
@@ -425,17 +475,40 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
       },
     }).addTo(map);
 
-    const n = data.features.length;
+    // Станции — поверх ячеек
+    if (siteFeatures.length) {
+      sitesLayer = L.geoJSON({ type: 'FeatureCollection', features: siteFeatures }, {
+        pointToLayer: (f, ll) => L.marker(ll, { icon: siteIcon(f.properties) }),
+        onEachFeature: (f, layer) => layer.on('click', (e) => {
+          e.originalEvent._cellClick = true;
+          openSite(f, layer);
+        }),
+      }).addTo(map);
+    }
+
+    const n = cellFeatures.length;
+    const ns = siteFeatures.length;
     const place = meta.district || meta.region || 'выгрузка';
     $('title').firstChild.nodeValue = place;
     $('subtitle').textContent =
-      `${n.toLocaleString('ru')} ${cellsWord(n)}` + (meta.period ? ` · ${meta.period}` : '');
+      `${n.toLocaleString('ru')} ${cellsWord(n)}`
+      + (ns ? ` · ${ns.toLocaleString('ru')} ${sitesWord(ns)}` : '')
+      + (meta.period ? ` · ${meta.period}` : '');
     $('empty').classList.add('hidden');
     $('legend').hidden = false;
     $('legendBar').style.background = gradientCss(0, 1);
     $('lgLo').textContent = oLo.toLocaleString('ru');
     $('lgHi').textContent = oHi.toLocaleString('ru');
-    if (n) map.fitBounds(cellsLayer.getBounds(), { padding: [20, 20] });
+    // легенда станций — только если они есть в файле
+    const lg = $('lgSites');
+    lg.hidden = ns === 0;
+    if (ns) {
+      lg.innerHTML =
+        `<span>${towerSvg(SITE_COLOR.active, 14)}станция UCELL</span>` +
+        `<span>${towerSvg(SITE_COLOR.inactive, 14)}не в эфире</span>`;
+    }
+    const all = L.featureGroup([cellsLayer, ...(sitesLayer ? [sitesLayer] : [])]);
+    if (n || ns) map.fitBounds(all.getBounds(), { padding: [20, 20] });
     $('listBtn').hidden = n === 0;
     $('listTitle').textContent = `${n.toLocaleString('ru')} ${cellsWord(n)}`;
     renderList();
@@ -525,7 +598,8 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
   }
 
   function openCell(f, layer) {
-    if (activeCell) activeCell.layer.setStyle(BASE_STYLE);
+    if (activeCell?.site) activeCell.layer.setIcon(siteIcon(activeCell.f.properties));
+    else if (activeCell) activeCell.layer.setStyle(BASE_STYLE);
     activeCell = { f, layer };
     layer.setStyle(ACTIVE_STYLE);
     layer.bringToFront();
@@ -544,6 +618,28 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
     $('sheet').classList.add('open');
   }
 
+  function openSite(f, layer) {
+    if (activeCell?.layer?.setStyle) activeCell.layer.setStyle(BASE_STYLE);
+    if (activeCell?.site) activeCell.layer.setIcon(siteIcon(activeCell.f.properties));
+    activeCell = { f, layer, site: true };
+    // выбранная станция крупнее остальных
+    layer.setIcon(siteIcon(f.properties, true));
+    markActiveRow();
+    const p = f.properties || {};
+    $('sTitle').textContent = p.site_name || 'Станция';
+    const rows = [
+      ['Статус', STATUS_LABEL[p.status] || p.status || '—', true],
+      ['Секторов', num(p.sectors)],
+      ['Азимуты', (p.azimuths || []).map((a) => `${Math.round(a)}°`).join(', ') || '—'],
+      ['Диапазоны', (p.bands || []).join(', ') || '—'],
+      ['Высота', p.height == null ? '—' : `${p.height} м`],
+    ];
+    $('sGrid').innerHTML = rows.map(([k, v, hot]) =>
+      `<dt>${k}</dt><dd${hot ? ' class="hot"' : ''}>${v}</dd>`).join('');
+    updateDistance();
+    $('sheet').classList.add('open');
+  }
+
   function markActiveRow() {
     // подсветка строки без перестройки всего списка: каждая строка
     // помнит свой слой, сравниваем с выбранным
@@ -554,7 +650,8 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
   }
 
   function closeCell() {
-    if (activeCell) activeCell.layer.setStyle(BASE_STYLE);
+    if (activeCell?.site) activeCell.layer.setIcon(siteIcon(activeCell.f.properties));
+    else if (activeCell) activeCell.layer.setStyle(BASE_STYLE);
     activeCell = null;
     markActiveRow();
     $('sheet').classList.remove('open');
@@ -568,8 +665,11 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
       $('sDist').innerHTML = '<small>нажмите кнопку справа, чтобы видеть расстояние</small>';
       return;
     }
-    const c = centroid(activeCell.layer);
-    $('sDist').innerHTML = `${fmtDist(distanceM(you, c))} <small>до центра ячейки</small>`;
+    const c = activeCell.site
+      ? [activeCell.layer.getLatLng().lat, activeCell.layer.getLatLng().lng]
+      : centroid(activeCell.layer);
+    const what = activeCell.site ? 'до станции' : 'до центра ячейки';
+    $('sDist').innerHTML = `${fmtDist(distanceM(you, c))} <small>${what}</small>`;
     if (youLine) youLine.setLatLngs([you, c]);
     else youLine = L.polyline([you, c], {
       color: '#1a73e8', weight: 2.5, dashArray: '6 6', interactive: false,
