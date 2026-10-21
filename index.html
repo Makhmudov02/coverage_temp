@@ -124,6 +124,43 @@ body {
 }
 .notice.show { display: block; }
 
+/* список ячеек: слева на ноутбуке, во весь экран на телефоне */
+.list {
+  position: absolute; z-index: 970; top: 0; left: 0; bottom: 0;
+  width: min(360px, 100%);
+  background: var(--paper); border-right: 1px solid var(--line);
+  display: flex; flex-direction: column;
+  transform: translateX(-102%); transition: transform .18s ease-out;
+}
+.list.open { transform: translateX(0); }
+@media (prefers-reduced-motion: reduce) { .list { transition: none; } }
+.list-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+.list-head b { flex: 1; font-weight: 600; }
+.seg { display: flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 13px; border: 0; padding: 6px 10px; cursor: pointer;
+  background: var(--paper); color: var(--ink-soft);
+}
+.seg button.on { background: var(--brand); color: var(--brand-ink); }
+.seg button:disabled { opacity: .45; cursor: default; }
+.list-body { overflow-y: auto; flex: 1; -webkit-overflow-scrolling: touch; }
+.row {
+  display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center;
+  width: 100%; text-align: left; font: inherit; color: var(--ink);
+  background: none; border: 0; border-bottom: 1px solid var(--line);
+  padding: 11px 14px; cursor: pointer; min-height: 52px;
+}
+.row:hover, .row:focus-visible { background: var(--paper-2); outline: none; }
+.row.active { background: color-mix(in srgb, var(--brand) 14%, var(--paper)); }
+.row i { width: 14px; height: 14px; border-radius: 3px; display: block; }
+.row .n { font-weight: 600; }
+.row .sub { display: block; font-size: 12px; color: var(--ink-soft); }
+.row .d { color: var(--you); font-weight: 500; white-space: nowrap; }
+.list-more { padding: 12px 14px; font-size: 13px; color: var(--ink-soft); }
+
 /* карточка ячейки снизу */
 .sheet {
   position: absolute; z-index: 980; left: 0; right: 0; bottom: 0;
@@ -152,6 +189,8 @@ body {
 
 <header class="bar">
   <h1 id="title">Места без UCELL<small id="subtitle">файл не выбран</small></h1>
+  <button class="btn ghost" id="listBtn" hidden aria-expanded="false"
+          aria-controls="list">Список</button>
   <button class="btn" id="open">Открыть файл</button>
   <input type="file" id="file" hidden>
 </header>
@@ -185,6 +224,18 @@ body {
     <div class="legend-bar" id="legendBar"></div>
     <div class="legend-scale"><span id="lgLo">меньше</span><span id="lgHi">больше</span></div>
   </div>
+
+  <aside class="list" id="list" aria-label="Список ячеек">
+    <div class="list-head">
+      <b id="listTitle">Ячейки</b>
+      <div class="seg" role="group" aria-label="Сортировка">
+        <button id="sortVol" class="on">по замерам</button>
+        <button id="sortDist" disabled title="Нужно местоположение">ближе</button>
+      </div>
+      <button class="sheet-close" id="listClose" aria-label="Закрыть список">×</button>
+    </div>
+    <div class="list-body" id="listBody"></div>
+  </aside>
 
   <section class="sheet" id="sheet" aria-live="polite">
     <div class="sheet-head">
@@ -296,6 +347,16 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
   const $ = (id) => document.getElementById(id);
   let cellsLayer = null, youMarker = null, youAccuracy = null, youLine = null;
   let you = null, watchId = null, following = false, activeCell = null;
+  // все ячейки файла со своими слоями: список строится по ним,
+  // щелчок по строке находит слой и приближает карту
+  let cells = [];
+  let fill = () => 'rgb(150,150,150)';
+  let sortBy = 'vol';
+  // больше сотен строк без виртуализации телефон не потянет, а глазами
+  // их всё равно не просмотреть: худшие наверху, остальное на карте
+  const LIST_LIMIT = 300;
+  const BASE_STYLE = { color: 'rgba(20,14,28,.55)', weight: 0.6 };
+  const ACTIVE_STYLE = { color: '#1a73e8', weight: 3 };
 
   function notice(text) {
     const n = $('notice');
@@ -337,22 +398,22 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
       .filter((v) => Number.isFinite(v));
     const oLo = others.length ? Math.min(...others) : 0;
     const oHi = others.length ? Math.max(...others) : 1;
-    const fill = (p) => logRamp(p?.others_n, oLo, oHi);
+    fill = (p) => logRamp(p?.others_n, oLo, oHi);
+    cells = [];
 
     if (cellsLayer) cellsLayer.remove();
     cellsLayer = L.geoJSON(data, {
-      style: (f) => ({
-        color: 'rgba(20,14,28,.55)', weight: 0.6,
-        fillColor: fill(f.properties),
-        fillOpacity: 0.62,
-      }),
-      onEachFeature: (f, layer) => layer.on('click', (e) => {
-        // щелчок по ячейке всплывает до карты, а щелчок по карте
-        // закрывает карточку — без пометки она открывалась бы и тут
-        // же исчезала
-        e.originalEvent._cellClick = true;
-        openCell(f, layer);
-      }),
+      style: (f) => ({ ...BASE_STYLE, fillColor: fill(f.properties), fillOpacity: 0.62 }),
+      onEachFeature: (f, layer) => {
+        cells.push({ f, layer, c: centroid(layer) });
+        layer.on('click', (e) => {
+          // щелчок по ячейке всплывает до карты, а щелчок по карте
+          // закрывает карточку — без пометки она открывалась бы и тут
+          // же исчезала
+          e.originalEvent._cellClick = true;
+          openCell(f, layer);
+        });
+      },
     }).addTo(map);
 
     const n = data.features.length;
@@ -366,6 +427,63 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
     $('lgLo').textContent = oLo.toLocaleString('ru');
     $('lgHi').textContent = oHi.toLocaleString('ru');
     if (n) map.fitBounds(cellsLayer.getBounds(), { padding: [20, 20] });
+    $('listBtn').hidden = n === 0;
+    $('listTitle').textContent = `${n.toLocaleString('ru')} ${cellsWord(n)}`;
+    renderList();
+  }
+
+  // ---------------------------------------------------------- список
+  function renderList() {
+    const rows = cells.map((x) => ({ ...x, dist: you ? distanceM(you, x.c) : null }));
+    if (sortBy === 'dist' && you) rows.sort((a, b) => a.dist - b.dist);
+    else rows.sort((a, b) => (b.f.properties?.others_n || 0) - (a.f.properties?.others_n || 0));
+
+    const shown = rows.slice(0, LIST_LIMIT);
+    const body = $('listBody');
+    body.innerHTML = '';
+    for (const r of shown) {
+      const p = r.f.properties || {};
+      const b = document.createElement('button');
+      b.className = 'row' + (activeCell && activeCell.layer === r.layer ? ' active' : '');
+      b.innerHTML =
+        `<i style="background:${fill(p)}"></i>` +
+        `<span><span class="n">${num(p.others_n)}</span> у конкурентов` +
+        `<span class="sub">${p.district || p.region || ''}</span></span>` +
+        `<span class="d">${r.dist == null ? '' : fmtDist(r.dist)}</span>`;
+      b._layer = r.layer;
+      b.addEventListener('click', () => pickFromList(r));
+      body.appendChild(b);
+    }
+    if (rows.length > LIST_LIMIT) {
+      const more = document.createElement('div');
+      more.className = 'list-more';
+      more.textContent = `Показаны ${LIST_LIMIT} из ${rows.length.toLocaleString('ru')}. ` +
+        'Остальные — на карте.';
+      body.appendChild(more);
+    }
+  }
+
+  function pickFromList(r) {
+    // приблизить так, чтобы ячейка была крупной, но с окрестностями
+    map.fitBounds(r.layer.getBounds(), { maxZoom: 17, padding: [60, 60] });
+    openCell(r.f, r.layer);
+    // на телефоне список закрывает карту целиком — убираем его,
+    // чтобы было видно, куда приехали
+    if (window.innerWidth < 720) toggleList(false);
+  }
+
+  function toggleList(force) {
+    const open = force ?? !$('list').classList.contains('open');
+    $('list').classList.toggle('open', open);
+    $('listBtn').setAttribute('aria-expanded', String(open));
+    if (open) renderList();
+  }
+
+  function setSort(by) {
+    sortBy = by;
+    $('sortVol').classList.toggle('on', by === 'vol');
+    $('sortDist').classList.toggle('on', by === 'dist');
+    renderList();
   }
 
   // ---------------------------------------------------------- карточка
@@ -375,7 +493,11 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
   }
 
   function openCell(f, layer) {
+    if (activeCell) activeCell.layer.setStyle(BASE_STYLE);
     activeCell = { f, layer };
+    layer.setStyle(ACTIVE_STYLE);
+    layer.bringToFront();
+    markActiveRow();
     const p = f.properties || {};
     $('sTitle').textContent = p.district || p.region || 'Ячейка';
     const rows = [
@@ -390,8 +512,19 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
     $('sheet').classList.add('open');
   }
 
+  function markActiveRow() {
+    // подсветка строки без перестройки всего списка: каждая строка
+    // помнит свой слой, сравниваем с выбранным
+    const target = activeCell ? activeCell.layer : null;
+    for (const el of $('listBody').querySelectorAll('.row')) {
+      el.classList.toggle('active', el._layer === target);
+    }
+  }
+
   function closeCell() {
+    if (activeCell) activeCell.layer.setStyle(BASE_STYLE);
     activeCell = null;
+    markActiveRow();
     $('sheet').classList.remove('open');
     if (youLine) { youLine.remove(); youLine = null; }
   }
@@ -452,7 +585,14 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
       youMarker.setLatLng(you);
       youAccuracy.setLatLng(you).setRadius(accuracy);
     }
-    if (first) map.setView(you, Math.max(map.getZoom(), 15));
+    if (first) {
+      map.setView(you, Math.max(map.getZoom(), 15));
+      $('sortDist').disabled = false;
+      $('sortDist').title = '';
+    }
+    // расстояния в списке пересчитываются, только когда он открыт:
+    // иначе каждая новая точка GPS перестраивала бы сотни строк впустую
+    if ($('list').classList.contains('open')) renderList();
     else if (following) map.panTo(you, { animate: true });
     updateDistance();
   }
@@ -482,6 +622,10 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
   $('open2').addEventListener('click', pick);
   $('file').addEventListener('change', (e) => { readFile(e.target.files[0]); e.target.value = ''; });
   $('locate').addEventListener('click', locate);
+  $('listBtn').addEventListener('click', () => toggleList());
+  $('listClose').addEventListener('click', () => toggleList(false));
+  $('sortVol').addEventListener('click', () => setSort('vol'));
+  $('sortDist').addEventListener('click', () => setSort('dist'));
   $('sClose').addEventListener('click', closeCell);
   map.on('click', (e) => { if (!e.originalEvent._cellClick) closeCell(); });
 
