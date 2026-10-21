@@ -473,12 +473,35 @@ const CARTO_KEY = 'cb1_4r7w_1_17dda6b3d2a98cb5d43153da';
   }
 
   function pickFromList(r) {
-    // приблизить так, чтобы ячейка была крупной, но с окрестностями
-    map.fitBounds(r.layer.getBounds(), { maxZoom: 17, padding: [60, 60] });
-    openCell(r.f, r.layer);
     // на телефоне список закрывает карту целиком — убираем его,
     // чтобы было видно, куда приехали
     if (window.innerWidth < 720) toggleList(false);
+    openCell(r.f, r.layer);
+    frameCell(r);
+  }
+
+  /**
+   * Подобрать вид под выбранную ячейку.
+   *
+   * Если известно, где вы, в кадр попадает весь путь — от вас до
+   * ячейки: в поле важнее видеть, куда идти, чем саму ячейку крупно.
+   * Если нет — только ячейка, но с окрестностями: улицы вокруг
+   * нужны, чтобы понять, где она.
+   *
+   * Снизу отступ на высоту карточки: она закрывает нижнюю часть
+   * экрана, и без этого ячейка оказывалась бы под ней.
+   */
+  function frameCell(r) {
+    // если высота карточки не прочиталась, берём 40% экрана — примерно
+    // столько она и занимает на телефоне. Иначе ячейка уехала бы под неё
+    const sheetH = $('sheet').offsetHeight || Math.round(window.innerHeight * 0.4);
+    const pad = { paddingTopLeft: [40, 40], paddingBottomRight: [40, sheetH + 24] };
+    if (you) {
+      const route = L.latLngBounds([you, r.c]).extend(r.layer.getBounds());
+      map.fitBounds(route, { ...pad, maxZoom: 16 });
+    } else {
+      map.fitBounds(r.layer.getBounds(), { ...pad, maxZoom: 15 });
+    }
   }
 
   function toggleList(force) {
