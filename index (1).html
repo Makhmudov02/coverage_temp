@@ -1,0 +1,484 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#5b2a86">
+<title>Места без UCELL · полевой просмотр</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+/*
+  Полевой просмотрщик выгрузки GeoJSON.
+
+  Страница НЕ содержит данных: файл выбирается на устройстве и читается
+  в браузере, никуда не отправляясь. Поэтому её можно держать на любом
+  публичном HTTPS-хостинге.
+
+  HTTPS нужен ради геолокации: браузеры дают её только в защищённом
+  контексте. Открытый с телефона файл (file://) таким не считается.
+*/
+:root {
+  --ink: #17121f;
+  --ink-soft: #5d566a;
+  --paper: #ffffff;
+  --paper-2: #f3f0f7;
+  --line: #ddd6e6;
+  --brand: #5b2a86;      /* фиолетовый UCELL */
+  --brand-ink: #ffffff;
+  --you: #1a73e8;        /* точка пользователя: привычный синий навигаторов */
+  --warn-bg: #fff4d6;
+  --warn-ink: #6b4a00;
+  color-scheme: light;
+  box-sizing: border-box;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f2eef7;
+    --ink-soft: #a9a1b6;
+    --paper: #1c1724;
+    --paper-2: #262030;
+    --line: #3a3246;
+    --brand: #a777d6;
+    --brand-ink: #160d20;
+    --warn-bg: #3a2f12;
+    --warn-ink: #f3d68b;
+    color-scheme: dark;
+  }
+}
+*, *::before, *::after { box-sizing: inherit; }
+html, body { height: 100%; margin: 0; }
+body {
+  font: 15px/1.45 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--ink);
+  background: var(--paper);
+  display: flex; flex-direction: column;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- верхняя полоса --- */
+.bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px; background: var(--paper);
+  border-bottom: 1px solid var(--line); z-index: 1000;
+}
+.bar h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 1; min-width: 0;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bar h1 small { display: block; font-weight: 400; color: var(--ink-soft); font-size: 12px; }
+.btn {
+  font: inherit; font-weight: 500; cursor: pointer;
+  border: 0; border-radius: 10px; padding: 9px 14px;
+  background: var(--brand); color: var(--brand-ink);
+  min-height: 40px; white-space: nowrap;
+}
+.btn:focus-visible, .fab:focus-visible { outline: 3px solid var(--you); outline-offset: 2px; }
+.btn.ghost { background: var(--paper-2); color: var(--ink); }
+
+/* --- карта --- */
+.stage { position: relative; flex: 1; min-height: 0; }
+#map { position: absolute; inset: 0; background: var(--paper-2); }
+
+/* пустое состояние до выбора файла */
+.empty {
+  position: absolute; inset: 0; z-index: 900;
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+  background: color-mix(in srgb, var(--paper) 88%, transparent);
+}
+.empty.hidden { display: none; }
+.empty-card { max-width: 340px; text-align: left; }
+.empty-card h2 { font-size: 22px; line-height: 1.2; font-weight: 600; margin: 0 0 10px; }
+.empty-card p { margin: 0 0 18px; color: var(--ink-soft); }
+.drop-hint { margin-top: 12px; font-size: 13px; color: var(--ink-soft); }
+.stage.dragging .empty { outline: 3px dashed var(--brand); outline-offset: -14px; }
+
+/* кнопка «где я» */
+.fab {
+  position: absolute; z-index: 950; right: 12px; bottom: 108px;
+  width: 52px; height: 52px; border-radius: 50%; border: 0; cursor: pointer;
+  background: var(--paper); color: var(--you);
+  box-shadow: 0 2px 10px rgba(0,0,0,.25);
+  display: grid; place-items: center;
+}
+.fab svg { width: 26px; height: 26px; }
+.fab.on { background: var(--you); color: #fff; }
+
+/* легенда */
+.legend {
+  position: absolute; z-index: 940; left: 12px; bottom: 12px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 10px; font-size: 12px; min-width: 180px;
+}
+.legend-bar { height: 10px; border-radius: 3px; margin: 5px 0 3px; }
+.legend-scale { display: flex; justify-content: space-between; color: var(--ink-soft); }
+
+/* предупреждения */
+.notice {
+  position: absolute; z-index: 960; left: 12px; right: 12px; top: 12px;
+  background: var(--warn-bg); color: var(--warn-ink);
+  border-radius: 10px; padding: 10px 12px; font-size: 13px;
+  display: none;
+}
+.notice.show { display: block; }
+
+/* карточка ячейки снизу */
+.sheet {
+  position: absolute; z-index: 980; left: 0; right: 0; bottom: 0;
+  background: var(--paper); border-top: 1px solid var(--line);
+  border-radius: 16px 16px 0 0; padding: 14px 16px 18px;
+  box-shadow: 0 -4px 18px rgba(0,0,0,.18);
+  transform: translateY(105%); transition: transform .18s ease-out;
+}
+.sheet.open { transform: translateY(0); }
+@media (prefers-reduced-motion: reduce) { .sheet { transition: none; } }
+.sheet-head { display: flex; align-items: baseline; gap: 10px; }
+.sheet-head b { font-size: 17px; font-weight: 600; flex: 1; }
+.sheet-close { background: none; border: 0; font-size: 24px; color: var(--ink-soft);
+               cursor: pointer; line-height: 1; padding: 0 4px; }
+/* расстояние до ячейки — главное в поле, поэтому оно крупнее прочего */
+.dist { font-size: 28px; font-weight: 600; margin: 6px 0 10px; color: var(--you); }
+.dist small { font-size: 13px; font-weight: 400; color: var(--ink-soft); }
+.grid { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; font-size: 14px; margin: 0; }
+.grid dt { color: var(--ink-soft); }
+.grid dd { margin: 0; text-align: right; }
+.grid dd.hot { font-weight: 600; }
+.leaflet-container { font: inherit; }
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <h1 id="title">Места без UCELL<small id="subtitle">файл не выбран</small></h1>
+  <button class="btn" id="open">Открыть файл</button>
+  <input type="file" id="file" hidden>
+</header>
+
+<div class="stage" id="stage">
+  <div id="map" aria-label="Карта"></div>
+
+  <div class="empty" id="empty">
+    <div class="empty-card">
+      <h2>Откройте выгрузку мест без UCELL</h2>
+      <p>Файл GeoJSON из карты покрытия, слой «Нет замеров UCELL». Он
+         читается здесь же, на устройстве, и никуда не отправляется.</p>
+      <button class="btn" id="open2">Выбрать файл</button>
+      <div class="drop-hint">На компьютере файл можно перетащить на карту.</div>
+    </div>
+  </div>
+
+  <div class="notice" id="notice" role="status"></div>
+
+  <button class="fab" id="locate" aria-label="Показать моё местоположение" title="Где я">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="3.2" fill="currentColor"/>
+      <circle cx="12" cy="12" r="7.5"/>
+      <path d="M12 1.5v3M12 19.5v3M1.5 12h3M19.5 12h3"/>
+    </svg>
+  </button>
+
+  <div class="legend" id="legend" hidden>
+    <div>Замеров у конкурентов</div>
+    <div class="legend-bar" id="legendBar"></div>
+    <div class="legend-scale"><span id="lgLo">меньше</span><span id="lgHi">больше</span></div>
+  </div>
+
+  <section class="sheet" id="sheet" aria-live="polite">
+    <div class="sheet-head">
+      <b id="sTitle">Ячейка</b>
+      <button class="sheet-close" id="sClose" aria-label="Закрыть">×</button>
+    </div>
+    <div class="dist" id="sDist"></div>
+    <dl class="grid" id="sGrid"></dl>
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(() => {
+  'use strict';
+
+  // ---------------------------------------------------------- шкала цвета
+  // Зелёный — мало замеров у конкурентов, то есть мелкая потеря;
+  // красный — много, то есть здесь UCELL не видит заметную массу людей.
+  const STOPS = [[40,150,70],[150,200,90],[247,200,70],[240,120,40],[202,0,32]];
+  function ramp(v, lo, hi) {
+    if (v == null || !isFinite(v)) return 'rgb(150,150,150)';
+    const t = Math.min(Math.max((v - lo) / (hi - lo || 1), 0), 1);
+    const pos = t * (STOPS.length - 1);
+    const i = Math.min(Math.floor(pos), STOPS.length - 2);
+    const f = pos - i, a = STOPS[i], b = STOPS[i + 1];
+    return `rgb(${a.map((x, k) => Math.round(x + (b[k] - x) * f)).join(',')})`;
+  }
+  // Шкала логарифмическая: разброс числа замеров между степью
+  // и посёлком в сотни раз, на линейной почти всё было бы одного цвета
+  const logRamp = (v, lo, hi) =>
+    ramp(Math.log1p(Math.max(v || 0, 0)), Math.log1p(lo), Math.log1p(hi));
+
+  function gradientCss(lo, hi) {
+    const n = 16, parts = [];
+    for (let i = 0; i < n; i++) {
+      const v = lo + (hi - lo) * i / (n - 1);
+      parts.push(`${ramp(v, lo, hi)} ${(i / (n - 1) * 100).toFixed(0)}%`);
+    }
+    return `linear-gradient(90deg, ${parts.join(',')})`;
+  }
+
+  // ---------------------------------------------------------- геометрия
+  // Гаверсинус: плоская формула на широте Узбекистана врала бы по
+  // долготе примерно на четверть
+  function distanceM(a, b) {
+    const R = 6371008.8, r = (d) => d * Math.PI / 180;
+    const dLat = r(b[0] - a[0]), dLng = r(b[1] - a[1]);
+    const h = Math.sin(dLat / 2) ** 2
+      + Math.cos(r(a[0])) * Math.cos(r(b[0])) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+  const fmtDist = (m) => m >= 1000 ? `${(m / 1000).toFixed(m >= 10000 ? 0 : 1)} км` : `${Math.round(m)} м`;
+  // 1 ячейка, 2 ячейки, 5 ячеек, 21 ячейка, 111 ячеек
+  function cellsWord(n) {
+    const a = n % 10, b = n % 100;
+    if (a === 1 && b !== 11) return 'ячейка';
+    if (a >= 2 && a <= 4 && (b < 12 || b > 14)) return 'ячейки';
+    return 'ячеек';
+  }
+  const pct = (v) => v == null ? '—' : `${(v * 100).toFixed(1)}%`;
+  const num = (v) => v == null ? '—' : Math.round(v).toLocaleString('ru');
+
+  // ---------------------------------------------------------- карта
+  const map = L.map('map', {
+    // canvas вместо SVG: выгрузка района бывает в тысячи ячеек,
+    // SVG на телефоне на таком объёме начинает тормозить
+    preferCanvas: true,
+    zoomControl: false,
+    attributionControl: true,
+  }).setView([41.3, 64.5], 6);
+  L.control.zoom({ position: 'topright' }).addTo(map);
+  // Подложка CARTO, а не серверы OpenStreetMap напрямую. Те держатся на
+  // волонтёрах и блокируют приложения, не соблюдающие их правила: без
+  // корректного Referer вместо карты приходит плитка «Access blocked».
+  // CARTO раздаёт ту же картографию OSM и рассчитан на такую нагрузку.
+  //
+  // Для большого числа пользователей нужен свой сервер плиток или
+  // платный поставщик: бесплатные условия CARTO ограничивают объём.
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    subdomains: 'abcd',
+    maxZoom: 19,
+    // браузер обязан сообщить, откуда пришёл запрос: без этого
+    // поставщики плиток отказывают
+    referrerPolicy: 'strict-origin-when-cross-origin',
+    attribution: '&copy; участники OpenStreetMap &copy; CARTO',
+  }).addTo(map);
+
+  const $ = (id) => document.getElementById(id);
+  let cellsLayer = null, youMarker = null, youAccuracy = null, youLine = null;
+  let you = null, watchId = null, following = false, activeCell = null;
+
+  function notice(text) {
+    const n = $('notice');
+    n.textContent = text || '';
+    n.classList.toggle('show', Boolean(text));
+  }
+
+  // ---------------------------------------------------------- загрузка
+  function readFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = () => notice('Не удалось прочитать файл.');
+    reader.onload = () => {
+      let data;
+      try { data = JSON.parse(reader.result); }
+      catch { notice('Это не JSON. Нужна выгрузка «GeoJSON» из карты покрытия.'); return; }
+      if (data?.type !== 'FeatureCollection' || !Array.isArray(data.features)) {
+        notice('В файле нет набора ячеек. Нужна выгрузка «GeoJSON» из карты покрытия.');
+        return;
+      }
+      // Ошибка при отрисовке не должна оставлять экран в состоянии
+      // «файл не выбран» без объяснений: раньше она проглатывалась
+      try { showData(data, file.name); }
+      catch (err) {
+        notice('Файл прочитан, но показать его не удалось: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  function showData(data, name) {
+    notice('');
+    const meta = data.metadata || {};
+
+    // Цвет — число замеров конкурентов: сколько людей в этом месте
+    // UCELL не видит. Края шкалы — фактический разброс в файле.
+    const others = data.features
+      .map((f) => Number(f.properties?.others_n))
+      .filter((v) => Number.isFinite(v));
+    const oLo = others.length ? Math.min(...others) : 0;
+    const oHi = others.length ? Math.max(...others) : 1;
+    const fill = (p) => logRamp(p?.others_n, oLo, oHi);
+
+    if (cellsLayer) cellsLayer.remove();
+    cellsLayer = L.geoJSON(data, {
+      style: (f) => ({
+        color: 'rgba(20,14,28,.55)', weight: 0.6,
+        fillColor: fill(f.properties),
+        fillOpacity: 0.62,
+      }),
+      onEachFeature: (f, layer) => layer.on('click', (e) => {
+        // щелчок по ячейке всплывает до карты, а щелчок по карте
+        // закрывает карточку — без пометки она открывалась бы и тут
+        // же исчезала
+        e.originalEvent._cellClick = true;
+        openCell(f, layer);
+      }),
+    }).addTo(map);
+
+    const n = data.features.length;
+    const place = meta.district || meta.region || 'выгрузка';
+    $('title').firstChild.nodeValue = place;
+    $('subtitle').textContent =
+      `${n.toLocaleString('ru')} ${cellsWord(n)}` + (meta.period ? ` · ${meta.period}` : '');
+    $('empty').classList.add('hidden');
+    $('legend').hidden = false;
+    $('legendBar').style.background = gradientCss(0, 1);
+    $('lgLo').textContent = oLo.toLocaleString('ru');
+    $('lgHi').textContent = oHi.toLocaleString('ru');
+    if (n) map.fitBounds(cellsLayer.getBounds(), { padding: [20, 20] });
+  }
+
+  // ---------------------------------------------------------- карточка
+  function centroid(layer) {
+    const c = layer.getBounds().getCenter();
+    return [c.lat, c.lng];
+  }
+
+  function openCell(f, layer) {
+    activeCell = { f, layer };
+    const p = f.properties || {};
+    $('sTitle').textContent = p.district || p.region || 'Ячейка';
+    const rows = [
+      ['Замеров у конкурентов', num(p.others_n), true],
+      ['UZMOBILE', num(p.uzmobile_n)],
+      ['BEELINE', num(p.beeline_n)],
+      ['UMS', num(p.ums_n)],
+    ];
+    $('sGrid').innerHTML = rows.map(([k, v, hot]) =>
+      `<dt>${k}</dt><dd${hot ? ' class="hot"' : ''}>${v}</dd>`).join('');
+    updateDistance();
+    $('sheet').classList.add('open');
+  }
+
+  function closeCell() {
+    activeCell = null;
+    $('sheet').classList.remove('open');
+    if (youLine) { youLine.remove(); youLine = null; }
+  }
+
+  // Расстояние от вас до ячейки — то, ради чего страница нужна в поле
+  function updateDistance() {
+    if (!activeCell) return;
+    if (!you) {
+      $('sDist').innerHTML = '<small>нажмите кнопку справа, чтобы видеть расстояние</small>';
+      return;
+    }
+    const c = centroid(activeCell.layer);
+    $('sDist').innerHTML = `${fmtDist(distanceM(you, c))} <small>до центра ячейки</small>`;
+    if (youLine) youLine.setLatLngs([you, c]);
+    else youLine = L.polyline([you, c], {
+      color: '#1a73e8', weight: 2.5, dashArray: '6 6', interactive: false,
+    }).addTo(map);
+  }
+
+  // ---------------------------------------------------------- геолокация
+  function locate() {
+    if (!window.isSecureContext) {
+      notice('Местоположение доступно только по HTTPS. Откройте страницу по ссылке, ' +
+             'а не файлом с телефона.');
+      return;
+    }
+    if (!('geolocation' in navigator)) { notice('Браузер не поддерживает геолокацию.'); return; }
+
+    if (watchId !== null) {
+      // уже следим — кнопка переключает «держать меня в центре»
+      following = !following;
+      $('locate').classList.toggle('on', following);
+      if (following && you) map.panTo(you);
+      return;
+    }
+    following = true;
+    $('locate').classList.add('on');
+    watchId = navigator.geolocation.watchPosition(onPos, onPosError, {
+      enableHighAccuracy: true, maximumAge: 5000, timeout: 20000,
+    });
+  }
+
+  function onPos(pos) {
+    notice('');
+    const { latitude, longitude, accuracy } = pos.coords;
+    const first = !you;
+    you = [latitude, longitude];
+    if (!youMarker) {
+      youAccuracy = L.circle(you, {
+        radius: accuracy, color: '#1a73e8', weight: 1,
+        fillColor: '#1a73e8', fillOpacity: 0.12, interactive: false,
+      }).addTo(map);
+      youMarker = L.circleMarker(you, {
+        radius: 8, color: '#fff', weight: 3,
+        fillColor: '#1a73e8', fillOpacity: 1, interactive: false,
+      }).addTo(map);
+    } else {
+      youMarker.setLatLng(you);
+      youAccuracy.setLatLng(you).setRadius(accuracy);
+    }
+    if (first) map.setView(you, Math.max(map.getZoom(), 15));
+    else if (following) map.panTo(you, { animate: true });
+    updateDistance();
+  }
+
+  function onPosError(err) {
+    const msg = {
+      1: 'Доступ к местоположению запрещён. Разрешите его в настройках браузера для этого сайта.',
+      2: 'Не удалось определить местоположение. Проверьте, включена ли геолокация на телефоне.',
+      3: 'Местоположение определяется слишком долго. Выйдите на открытое место и попробуйте ещё раз.',
+    }[err.code] || 'Не удалось определить местоположение.';
+    notice(msg);
+    if (err.code === 1) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null; following = false;
+      $('locate').classList.remove('on');
+    }
+  }
+
+  // пользователь тянет карту сам — перестаём возвращать его в центр
+  map.on('dragstart', () => {
+    if (following) { following = false; $('locate').classList.remove('on'); }
+  });
+
+  // ---------------------------------------------------------- события
+  const pick = () => $('file').click();
+  $('open').addEventListener('click', pick);
+  $('open2').addEventListener('click', pick);
+  $('file').addEventListener('change', (e) => { readFile(e.target.files[0]); e.target.value = ''; });
+  $('locate').addEventListener('click', locate);
+  $('sClose').addEventListener('click', closeCell);
+  map.on('click', (e) => { if (!e.originalEvent._cellClick) closeCell(); });
+
+  // перетаскивание файла на компьютере
+  const stage = $('stage');
+  ['dragenter', 'dragover'].forEach((t) => stage.addEventListener(t, (e) => {
+    e.preventDefault(); stage.classList.add('dragging');
+  }));
+  ['dragleave', 'drop'].forEach((t) => stage.addEventListener(t, (e) => {
+    e.preventDefault(); stage.classList.remove('dragging');
+  }));
+  stage.addEventListener('drop', (e) => readFile(e.dataTransfer.files[0]));
+
+  if (!window.isSecureContext) {
+    notice('Страница открыта не по HTTPS — ячейки покажутся, но местоположение работать не будет.');
+  }
+})();
+</script>
+</body>
+</html>
